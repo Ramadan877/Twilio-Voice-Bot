@@ -1,3 +1,4 @@
+"""Here it listens on /media-stream for Twilio's connection, opens a second connection to OpenAI, and passes the binary audio buffers back and forth concurrently"""
 import json
 import asyncio
 from fastapi import APIRouter, WebSocket
@@ -6,8 +7,8 @@ import websockets
 
 router = APIRouter()
 
-# OpenAI Realtime API WebSocket URL
-OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
+# FIX: Updated the model name from the deprecated preview version to the official GA version
+OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
 
 @router.websocket("/media-stream")
 async def handle_media_stream(twilio_ws: WebSocket):
