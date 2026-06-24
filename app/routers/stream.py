@@ -7,7 +7,6 @@ import websockets
 
 router = APIRouter()
 
-# FIX: Updated the model name from the deprecated preview version to the official GA version
 OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
 
 @router.websocket("/media-stream")
@@ -18,7 +17,6 @@ async def handle_media_stream(twilio_ws: WebSocket):
     await twilio_ws.accept()
     print("Twilio phone stream connected.")
 
-    # 1. GA MIGRATION: Removed the deprecated "OpenAI-Beta" header
     openai_headers = {
         "Authorization": f"Bearer {settings.OPENAI_API_KEY}"
     }
@@ -26,31 +24,34 @@ async def handle_media_stream(twilio_ws: WebSocket):
     async with websockets.connect(OPENAI_WS_URL, additional_headers=openai_headers) as openai_ws:
         print("Connected to OpenAI Realtime API.")
         
-        # Track the Twilio stream ID to ensure audio routes back to the correct phone call
+        # 1. THE RACE CONDITION FIX: 
+        # Halt everything and wait for Twilio to give us the stream_sid FIRST.
         stream_sid = None
+        while stream_sid is None:
+            message = await twilio_ws.receive_text()
+            data = json.loads(message)
+            if data.get('event') == 'start':
+                stream_sid = data['start']['streamSid']
+                print(f"Call started. Stream SID captured: {stream_sid}")
+            # If random media arrives early, ignore it until we have the SID
+            elif data.get('event') == 'media':
+                pass
 
-        # Initialize the session parameters with OpenAI
+        # Now that we safely have the ID, initialize the AI and force it to speak
         await initialize_openai_session(openai_ws)
 
         # Define the task to receive audio from Twilio and send it to OpenAI
         async def receive_from_twilio():
-            nonlocal stream_sid
             try:
+                # iter_text() will pick up right where the while loop left off
                 async for message in twilio_ws.iter_text():
                     data = json.loads(message)
                     
-                    if data['event'] == 'start':
-                        stream_sid = data['start']['streamSid']
-                        print(f"Call started. Stream SID: {stream_sid}")
-                        
-                    elif data['event'] == 'media':
-                        # Extract raw base64 audio payload from Twilio
-                        base64_audio = data['media']['payload']
-                        
+                    if data['event'] == 'media':
                         # Forward audio chunk directly to OpenAI
                         audio_event = {
                             "type": "input_audio_buffer.append",
-                            "audio": base64_audio
+                            "audio": data['media']['payload']
                         }
                         await openai_ws.send(json.dumps(audio_event))
                         
@@ -65,9 +66,15 @@ async def handle_media_stream(twilio_ws: WebSocket):
             try:
                 async for message in openai_ws:
                     response = json.loads(message)
+                    event_type = response.get("type")
                     
-                    # FIX: Changed back to 'response.audio.delta' to catch the AI's voice packets
-                    if response.get("type") == "response.audio.delta" and stream_sid:
+                    # DEBUG LOGGING: So we are never blind in the void again!
+                    # (We ignore printing 'delta' so it doesn't spam the console 100x a second)
+                    if "delta" not in event_type:
+                        print(f"OpenAI Event: {event_type}")
+                    
+                    # 2. THE EVENT FIX: Catching the official GA audio delta packet
+                    if event_type == "response.output_audio.delta":
                         base64_output_audio = response["delta"]
                         
                         # Format the packet exactly how Twilio expects it
@@ -96,8 +103,7 @@ async def initialize_openai_session(openai_ws):
             "modalities": ["audio", "text"],
             "instructions": "You are a helpful, witty, and highly concise phone assistant. Keep answers brief since this is a phone call.",
             "voice": "alloy",
-            # FIX: Reverted to the flat structure required for Twilio's telephone encoding
-            "input_audio_format": "g711_ulaw",
+            "input_audio_format": "g711_ulaw", 
             "output_audio_format": "g711_ulaw",
             "turn_detection": {
                 "type": "server_vad"
@@ -106,7 +112,6 @@ async def initialize_openai_session(openai_ws):
     }
     await openai_ws.send(json.dumps(session_update))
 
-    # FIX: Force the AI to speak first so you know the connection is live!
     initial_greeting = {
         "type": "response.create",
         "response": {
