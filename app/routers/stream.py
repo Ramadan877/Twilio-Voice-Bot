@@ -66,8 +66,8 @@ async def handle_media_stream(twilio_ws: WebSocket):
                 async for message in openai_ws:
                     response = json.loads(message)
                     
-                    # 2. GA MIGRATION: Changed event name to 'response.output_audio.delta'
-                    if response.get("type") == "response.output_audio.delta" and stream_sid:
+                    # FIX: Changed back to 'response.audio.delta' to catch the AI's voice packets
+                    if response.get("type") == "response.audio.delta" and stream_sid:
                         base64_output_audio = response["delta"]
                         
                         # Format the packet exactly how Twilio expects it
@@ -96,14 +96,21 @@ async def initialize_openai_session(openai_ws):
             "modalities": ["audio", "text"],
             "instructions": "You are a helpful, witty, and highly concise phone assistant. Keep answers brief since this is a phone call.",
             "voice": "alloy",
-            # 3. GA MIGRATION: Audio formats moved into nested objects using 'audio/pcmu'
-            "audio": {
-                "input": { "format": { "type": "audio/pcmu" } },
-                "output": { "format": { "type": "audio/pcmu" } }
-            },
+            # FIX: Reverted to the flat structure required for Twilio's telephone encoding
+            "input_audio_format": "g711_ulaw",
+            "output_audio_format": "g711_ulaw",
             "turn_detection": {
                 "type": "server_vad"
             }
         }
     }
     await openai_ws.send(json.dumps(session_update))
+
+    # FIX: Force the AI to speak first so you know the connection is live!
+    initial_greeting = {
+        "type": "response.create",
+        "response": {
+            "instructions": "Greet the user warmly with 'Hello! I am connected. How can I help you today?'"
+        }
+    }
+    await openai_ws.send(json.dumps(initial_greeting))
