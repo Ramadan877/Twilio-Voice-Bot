@@ -1,7 +1,6 @@
 """Here it listens on /media-stream for Twilio's connection, opens a second connection to OpenAI, and passes the binary audio buffers back and forth concurrently"""
 import json
 import asyncio
-import base64
 from fastapi import APIRouter, WebSocket
 from app.config import settings
 import websockets
@@ -25,8 +24,8 @@ async def handle_media_stream(twilio_ws: WebSocket):
         "OpenAI-Beta": "realtime=v1"
     }
 
-    # Connect to OpenAI's real-time brain
-    async with websockets.connect(OPENAI_WS_URL, extra_headers=openai_headers) as openai_ws:
+    # FIX: Changed 'extra_headers' to 'additional_headers' to support the latest websockets library
+    async with websockets.connect(OPENAI_WS_URL, additional_headers=openai_headers) as openai_ws:
         print("Connected to OpenAI Realtime API.")
         
         # Track the Twilio stream ID to ensure audio routes back to the correct phone call
