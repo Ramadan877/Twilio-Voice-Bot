@@ -22,7 +22,8 @@ async def handle_media_stream(twilio_ws: WebSocket):
     }
 
     try:
-        async with websockets.connect(OPENAI_WS_URL, additional_headers=openai_headers) as openai_ws:
+        # FIX: Added ping_interval=None to stop the library from dropping the connection during heavy audio streams!
+        async with websockets.connect(OPENAI_WS_URL, additional_headers=openai_headers, ping_interval=None) as openai_ws:
             print("Connected to OpenAI Realtime API.")
             
             stream_sid = None
