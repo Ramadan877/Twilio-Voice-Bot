@@ -7,7 +7,8 @@ import websockets
 
 router = APIRouter()
 
-OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+# FIX 1: Using the official, stable model alias for General Availability
+OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
 
 @router.websocket("/media-stream")
 async def handle_media_stream(twilio_ws: WebSocket):
@@ -57,6 +58,11 @@ async def handle_media_stream(twilio_ws: WebSocket):
             async def send_to_twilio():
                 nonlocal stream_sid
                 try:
+                    # FIX 2: The "Empty Room" Fix
+                    # Wait in a tiny loop until Twilio gives us the phone call ID before we wake up the AI
+                    while stream_sid is None:
+                        await asyncio.sleep(0.1)
+
                     # 1. Send the session configuration immediately
                     session_update = {
                         "type": "session.update",
