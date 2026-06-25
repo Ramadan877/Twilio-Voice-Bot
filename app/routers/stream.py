@@ -129,7 +129,20 @@ async def handle_media_stream(twilio_ws: WebSocket):
                                         "You are a helpful phone assistant. "
                                         "Be brief and conversational."
                                     ),
-                                    "voice": "alloy"
+                                    "voice": "alloy",
+
+                                    "audio": {
+                                        "input": {
+                                            "format": {
+                                                "type": "audio/pcmu"
+                                            }
+                                        },
+                                        "output": {
+                                            "format": {
+                                                "type": "audio/pcmu"
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
@@ -274,6 +287,20 @@ async def handle_media_stream(twilio_ws: WebSocket):
                         # ERRORS
                         # -----------------------------------------------------
 
+                        elif event_type == "session.created":
+
+                            logger.info(
+                                "SESSION CREATED:\n%s",
+                                json.dumps(response, indent=2)
+                            )
+
+                        elif event_type == "session.updated":
+
+                            logger.info(
+                                "SESSION UPDATED:\n%s",
+                                json.dumps(response, indent=2)
+                            )
+
                         elif event_type == "error":
 
                             logger.error(
@@ -283,7 +310,7 @@ async def handle_media_stream(twilio_ws: WebSocket):
                                     indent=2
                                 )
                             )
-
+                            
                 except websockets.ConnectionClosed as e:
 
                     logger.error(
