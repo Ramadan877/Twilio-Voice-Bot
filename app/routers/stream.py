@@ -32,7 +32,8 @@ router = APIRouter()
 # OpenAI Realtime endpoint
 # ------------------------------------------------------------------
 
-OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
+OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+
 # ------------------------------------------------------------------
 # helper
 # ------------------------------------------------------------------
@@ -79,7 +80,6 @@ async def media_stream(twilio_ws: WebSocket):
                     "instructions": "You are a helpful phone assistant. Be brief.",
                     "input_audio_format": "g711_ulaw",
                     "output_audio_format": "g711_ulaw",
-                    "voice": "alloy",
                     "turn_detection": {
                         "type": "server_vad"
                     }
@@ -118,6 +118,14 @@ async def media_stream(twilio_ws: WebSocket):
                         await openai_ws.send(json.dumps({
                             "type": "input_audio_buffer.append",
                             "audio": audio_payload
+                        }))
+
+                        await openai_ws.send(json.dumps({
+                            "type": "input_audio_buffer.commit"
+                        }))
+
+                        await openai_ws.send(json.dumps({
+                            "type": "response.create"
                         }))
 
                     elif event == "stop":
