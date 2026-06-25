@@ -161,48 +161,79 @@
 #     except Exception:
 #         logger.exception("FAILED WEBSOCKET")
 
-import asyncio
+"""
+Minimal Twilio <-> OpenAI Realtime bridge (WORKING BASELINE)
+"""
+
 import json
+import asyncio
+import logging
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import websockets
+from app.config import settings
 
-# ------------------------------------------------------------
-# CONFIG
-# ------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
 
-OPENAI_API_KEY = "YOUR_API_KEY_HERE"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("stream")
 
-OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
+# -----------------------------------------------------------------------------
+# Router
+# -----------------------------------------------------------------------------
 
+router = APIRouter()
 
-# ------------------------------------------------------------
-# MAIN TEST
-# ------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# OpenAI
+# -----------------------------------------------------------------------------
 
-async def test_openai_realtime():
+OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+
+async def send_openai(ws, payload: dict):
+    await ws.send(json.dumps(payload))
+
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
+
+@router.websocket("/media-stream")
+async def media_stream(twilio_ws: WebSocket):
+
+    await twilio_ws.accept()
+    logger.info("TWILIO CONNECTED")
 
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
         "OpenAI-Beta": "realtime=v1"
     }
+
+    stream_sid = None
 
     try:
         async with websockets.connect(
             OPENAI_WS_URL,
-            additional_headers=headers,
-            ping_interval=20
-        ) as ws:
+            extra_headers=headers,
+            ping_interval=None
+        ) as openai_ws:
 
-            print("✅ Connected to OpenAI Realtime")
+            logger.info("OPENAI CONNECTED")
 
-            # --------------------------------------------------------
-            # SAFE SESSION UPDATE (MINIMAL + COMPATIBLE)
-            # --------------------------------------------------------
+            # ---------------------------------------------------------
+            # INITIAL SESSION (MINIMAL + CORRECT)
+            # ---------------------------------------------------------
 
             session_update = {
                 "type": "session.update",
                 "session": {
-                    "modalities": ["audio"],
-                    "instructions": "You are a helpful assistant. Say hello briefly.",
+                    "modalities": ["audio", "text"],
+                    "instructions": "You are a helpful phone assistant. Be brief.",
                     "input_audio_format": "g711_ulaw",
                     "output_audio_format": "g711_ulaw",
                     "turn_detection": {
@@ -211,52 +242,66 @@ async def test_openai_realtime():
                 }
             }
 
-            await ws.send(json.dumps(session_update))
-            print("➡️ session.update sent")
+            await send_openai(openai_ws, session_update)
 
-            # --------------------------------------------------------
-            # REQUEST A RESPONSE
-            # --------------------------------------------------------
+            async def twilio_to_openai():
+                nonlocal stream_sid
 
-            response_create = {
-                "type": "response.create",
-                "response": {
-                    "instructions": "Say: Hello!"
-                }
-            }
+                async for msg in twilio_ws.iter_text():
+                    data = json.loads(msg)
+                    event = data.get("event")
 
-            await ws.send(json.dumps(response_create))
-            print("➡️ response.create sent")
+                    if event == "start":
+                        stream_sid = data["start"]["streamSid"]
+                        logger.info(f"CALL STARTED {stream_sid}")
 
-            # --------------------------------------------------------
-            # LISTEN FOR EVENTS
-            # --------------------------------------------------------
+                        # trigger greeting
+                        await send_openai(openai_ws, {
+                            "type": "response.create",
+                            "response": {
+                                "instructions": "Say: Hello! How can I help you today?"
+                            }
+                        })
 
-            async for message in ws:
+                    elif event == "media":
+                        audio = data["media"]["payload"]
 
-                event = json.loads(message)
-                event_type = event.get("type")
+                        # IMPORTANT: send audio chunks correctly
+                        await send_openai(openai_ws, {
+                            "type": "input_audio_buffer.append",
+                            "audio": audio
+                        })
 
-                print("⬅️", event_type)
+                    elif event == "stop":
+                        logger.info("CALL STOP")
+                        break
 
-                # PRINT ERRORS CLEARLY
-                if event_type == "error":
-                    print("\n❌ OPENAI ERROR:")
-                    print(json.dumps(event, indent=2))
+            async def openai_to_twilio():
 
-                # STOP AFTER COMPLETION
-                if event_type == "response.done":
-                    print("\n✅ RESPONSE COMPLETE")
-                    break
+                async for msg in openai_ws:
+                    event = json.loads(msg)
+                    t = event.get("type")
+
+                    # ONLY audio delta
+                    if t == "response.output_audio.delta" and stream_sid:
+                        payload = event["delta"]
+
+                        await twilio_ws.send_text(json.dumps({
+                            "event": "media",
+                            "streamSid": stream_sid,
+                            "media": {"payload": payload}
+                        }))
+
+                    elif t == "error":
+                        logger.error(event)
+
+            await asyncio.gather(
+                twilio_to_openai(),
+                openai_to_twilio()
+            )
+
+    except WebSocketDisconnect:
+        logger.info("TWILIO DISCONNECTED")
 
     except Exception as e:
-        print("❌ Connection failed:")
-        print(e)
-
-
-# ------------------------------------------------------------
-# RUN
-# ------------------------------------------------------------
-
-if __name__ == "__main__":
-    asyncio.run(test_openai_realtime())
+        logger.exception("FATAL ERROR")
