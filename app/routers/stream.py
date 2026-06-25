@@ -22,9 +22,9 @@ async def handle_media_stream(twilio_ws: WebSocket):
     await twilio_ws.accept()
     logger.info("Twilio phone stream connected.")
 
+    # officially using the General Availability API 
     openai_headers = {
-        "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-        "OpenAI-Beta": "realtime=v1"
+        "Authorization": f"Bearer {settings.OPENAI_API_KEY}"
     }
 
     try:
@@ -92,7 +92,7 @@ async def handle_media_stream(twilio_ws: WebSocket):
                         response = json.loads(message)
                         event_type = response.get("type")
                         
-                        # EXPLICIT ERROR CATCHER: If OpenAI is angry, tell us exactly why!
+                        # EXPLICIT ERROR CATCHER:
                         if event_type == "error":
                             logger.error(f"OPENAI API FATAL ERROR: {response}")
                             
