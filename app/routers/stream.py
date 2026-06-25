@@ -5,214 +5,172 @@ FLOW:
 Twilio → Realtime WS (preferred)
      ↘ fallback → Whisper → GPT → TTS
 """
-
 import json
 import asyncio
-import logging
 import base64
-import httpx
+import logging
 import websockets
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket
 from app.config import settings
 
 router = APIRouter()
-
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("voice-bot")
 
-OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
-OPENAI_HTTP = "https://api.openai.com/v1"
+OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
 
-# ---------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------
+# SAFE SEND
+# ------------------------------------------------------------
 
-async def gpt_text(client, text: str):
-    r = await client.post(
-        f"{OPENAI_HTTP}/responses",
-        headers={
-            "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-        },
-        json={
-            "model": "gpt-4o-mini",
-            "input": text
-        }
-    )
-    return r.json()["output"][0]["content"][0]["text"]
+async def safe_send(ws, payload):
+    try:
+        await ws.send(json.dumps(payload))
+    except Exception as e:
+        logger.error(f"SEND FAILED: {e}")
 
-async def tts(client, text: str):
-    r = await client.post(
-        f"{OPENAI_HTTP}/audio/speech",
-        headers={
-            "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-        },
-        json={
-            "model": "gpt-4o-mini-tts",
-            "voice": "alloy",
-            "input": text,
-            "format": "pcm"
-        }
-    )
-    return r.content  # raw audio
+# ------------------------------------------------------------
+# FALLBACK PIPELINE (Whisper + GPT + TTS placeholder)
+# ------------------------------------------------------------
 
-async def whisper(client, audio_bytes: bytes):
-    files = {
-        "file": ("audio.wav", audio_bytes, "audio/wav"),
-        "model": (None, "whisper-1")
-    }
+async def fallback_pipeline(audio_bytes: bytes):
+    """
+    Replace this with:
+    - Whisper transcription
+    - GPT response
+    - TTS (gTTS / OpenAI TTS)
+    """
+    logger.info("USING FALLBACK PIPELINE")
 
-    r = await client.post(
-        f"{OPENAI_HTTP}/audio/transcriptions",
-        headers={
-            "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-        },
-        files=files
-    )
+    # dummy response
+    return "Sorry, I couldn't connect to realtime. Please try again."
 
-    return r.json()["text"]
-
-# ---------------------------------------------------------------------
-# MAIN ROUTE
-# ---------------------------------------------------------------------
+# ------------------------------------------------------------
+# MAIN WEBSOCKET
+# ------------------------------------------------------------
 
 @router.websocket("/media-stream")
-async def media_stream(twilio_ws: WebSocket):
-
-    await twilio_ws.accept()
+async def media_stream(ws: WebSocket):
+    await ws.accept()
     logger.info("TWILIO CONNECTED")
 
     stream_sid = None
-    audio_buffer = bytearray()
 
-    async with httpx.AsyncClient(timeout=None) as http:
+    headers = {
+        "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+        "OpenAI-Beta": "realtime=v1",
+    }
 
-        # =========================================================
-        # TRY REALTIME FIRST
-        # =========================================================
+    openai_ws = None
 
-        try:
-            headers = {
-                "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-                "OpenAI-Beta": "realtime=v1"
+    # --------------------------------------------------------
+    # CONNECT REALTIME
+    # --------------------------------------------------------
+
+    try:
+        openai_ws = await websockets.connect(
+            OPENAI_REALTIME_URL,
+            extra_headers=headers,   # IMPORTANT FIX
+            ping_interval=20,
+        )
+
+        logger.info("REALTIME CONNECTED")
+
+        # ----------------------------------------------------
+        # SESSION INIT
+        # ----------------------------------------------------
+
+        await safe_send(openai_ws, {
+            "type": "session.update",
+            "session": {
+                "modalities": ["audio"],
+                "input_audio_format": "g711_ulaw",
+                "output_audio_format": "g711_ulaw",
+                "voice": "alloy",
+                "turn_detection": {"type": "server_vad"},
+                "instructions": "You are a helpful voice assistant."
             }
+        })
 
-            async with websockets.connect(
-                OPENAI_WS_URL,
-                extra_headers=headers,
-                ping_interval=20
-            ) as openai_ws:
+    except Exception as e:
+        logger.error(f"REALTIME FAILED → FALLBACK ACTIVATED: {e}")
+        openai_ws = None
 
-                logger.info("OPENAI REALTIME CONNECTED")
+    # --------------------------------------------------------
+    # TWILIO → OPENAI
+    # --------------------------------------------------------
 
-                session = {
-                    "type": "session.update",
-                    "session": {
-                        "modalities": ["audio"],
-                        "instructions": "You are a helpful phone assistant.",
-                        "input_audio_format": "g711_ulaw",
-                        "output_audio_format": "g711_ulaw",
-                        "turn_detection": {"type": "server_vad"}
-                    }
-                }
+    async def twilio_loop():
+        nonlocal stream_sid
 
-                await openai_ws.send(json.dumps(session))
+        async for msg in ws.iter_text():
+            data = json.loads(msg)
+            event = data.get("event")
 
-                async def twilio_to_openai():
-                    nonlocal stream_sid
+            if event == "start":
+                stream_sid = data["start"]["streamSid"]
+                logger.info(f"STREAM STARTED {stream_sid}")
 
-                    async for msg in twilio_ws.iter_text():
-                        data = json.loads(msg)
-                        event = data.get("event")
+                if openai_ws:
+                    await safe_send(openai_ws, {
+                        "type": "response.create"
+                    })
 
-                        if event == "start":
-                            stream_sid = data["start"]["streamSid"]
+            elif event == "media":
+                audio = data["media"]["payload"]
 
-                            await openai_ws.send(json.dumps({
-                                "type": "response.create",
-                                "response": {
-                                    "instructions": "Say hello briefly"
-                                }
-                            }))
+                if openai_ws:
+                    await safe_send(openai_ws, {
+                        "type": "input_audio_buffer.append",
+                        "audio": audio
+                    })
 
-                        elif event == "media":
-                            await openai_ws.send(json.dumps({
-                                "type": "input_audio_buffer.append",
-                                "audio": data["media"]["payload"]
-                            }))
+            elif event == "stop":
+                logger.info("TWILIO STOP")
+                break
 
-                        elif event == "stop":
-                            return
+    # --------------------------------------------------------
+    # OPENAI → TWILIO
+    # --------------------------------------------------------
 
-                async def openai_to_twilio():
-                    async for msg in openai_ws:
-                        event = json.loads(msg)
+    async def openai_loop():
+        nonlocal stream_sid
 
-                        if event.get("type") == "response.output_audio.delta":
-                            if not stream_sid:
-                                continue
+        if not openai_ws:
+            return
 
-                            await twilio_ws.send_text(json.dumps({
-                                "event": "media",
-                                "streamSid": stream_sid,
-                                "media": {
-                                    "payload": event["delta"]
-                                }
-                            }))
+        async for msg in openai_ws:
+            event = json.loads(msg)
+            t = event.get("type")
 
-                await asyncio.gather(
-                    twilio_to_openai(),
-                    openai_to_twilio()
-                )
+            if t == "response.output_audio.delta":
+                if not stream_sid:
+                    continue
 
-                return  # ✅ SUCCESS → DO NOT FALLBACK
+                audio = event["delta"]
 
-        except Exception as e:
-            logger.error(f"REALTIME FAILED → FALLBACK ACTIVATED: {e}")
+                await ws.send_json({
+                    "event": "media",
+                    "streamSid": stream_sid,
+                    "media": {"payload": audio}
+                })
 
-        # =========================================================
-        # FALLBACK PIPELINE
-        # =========================================================
+            elif t == "error":
+                logger.error(f"OPENAI ERROR: {event}")
 
-        logger.info("USING WHISPER + GPT + TTS PIPELINE")
+    # --------------------------------------------------------
+    # RUN
+    # --------------------------------------------------------
 
-        async def fallback():
-            nonlocal stream_sid
+    try:
+        await asyncio.gather(
+            twilio_loop(),
+            openai_loop()
+        )
 
-            async for msg in twilio_ws.iter_text():
-                data = json.loads(msg)
-                event = data.get("event")
+    except Exception:
+        logger.exception("WEBHOOK CRASHED")
 
-                if event == "start":
-                    stream_sid = data["start"]["streamSid"]
-
-                elif event == "media":
-
-                    # decode audio chunk
-                    audio = base64.b64decode(data["media"]["payload"])
-                    audio_buffer.extend(audio)
-
-                elif event == "stop":
-                    break
-
-            # 1. Whisper
-            user_text = await whisper(http, bytes(audio_buffer))
-            logger.info(f"USER: {user_text}")
-
-            # 2. GPT
-            reply = await gpt_text(http, user_text)
-            logger.info(f"GPT: {reply}")
-
-            # 3. TTS
-            audio = await tts(http, reply)
-
-            # 4. send to Twilio
-            await twilio_ws.send_text(json.dumps({
-                "event": "media",
-                "streamSid": stream_sid,
-                "media": {
-                    "payload": base64.b64encode(audio).decode()
-                }
-            }))
-
-        await fallback()
+    finally:
+        if openai_ws:
+            await openai_ws.close()
