@@ -9,6 +9,7 @@ import json
 import asyncio
 import base64
 import logging
+import requests
 import websockets
 
 from fastapi import APIRouter, WebSocket
@@ -19,35 +20,50 @@ logger = logging.getLogger("voice-bot")
 
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
 
-# ------------------------------------------------------------
-# SAFE SEND
-# ------------------------------------------------------------
+# ============================================================
+# TTS FALLBACK (ALWAYS WORKS)
+# ============================================================
 
-async def safe_send(ws, payload):
+async def tts_speak(text: str, stream_sid: str, ws: WebSocket):
+    """
+    Uses OpenAI TTS to generate Twilio-compatible audio
+    """
+
     try:
-        await ws.send(json.dumps(payload))
+        logger.info(f"TTS: {text}")
+
+        response = requests.post(
+            "https://api.openai.com/v1/audio/speech",
+            headers={
+                "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "gpt-4o-mini-tts",
+                "voice": "alloy",
+                "input": text,
+                "format": "mulaw_8000"
+            },
+            timeout=30
+        )
+
+        audio_b64 = base64.b64encode(response.content).decode("utf-8")
+
+        await ws.send_json({
+            "event": "media",
+            "streamSid": stream_sid,
+            "media": {
+                "payload": audio_b64
+            }
+        })
+
     except Exception as e:
-        logger.error(f"SEND FAILED: {e}")
+        logger.error(f"TTS FAILED: {e}")
 
-# ------------------------------------------------------------
-# FALLBACK PIPELINE (Whisper + GPT + TTS placeholder)
-# ------------------------------------------------------------
 
-async def fallback_pipeline(audio_bytes: bytes):
-    """
-    Replace this with:
-    - Whisper transcription
-    - GPT response
-    - TTS (gTTS / OpenAI TTS)
-    """
-    logger.info("USING FALLBACK PIPELINE")
-
-    # dummy response
-    return "Sorry, I couldn't connect to realtime. Please try again."
-
-# ------------------------------------------------------------
-# MAIN WEBSOCKET
-# ------------------------------------------------------------
+# ============================================================
+# MAIN ROUTE
+# ============================================================
 
 @router.websocket("/media-stream")
 async def media_stream(ws: WebSocket):
@@ -55,32 +71,25 @@ async def media_stream(ws: WebSocket):
     logger.info("TWILIO CONNECTED")
 
     stream_sid = None
-
-    headers = {
-        "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-        "OpenAI-Beta": "realtime=v1",
-    }
-
     openai_ws = None
 
     # --------------------------------------------------------
-    # CONNECT REALTIME
+    # TRY REALTIME CONNECTION
     # --------------------------------------------------------
 
     try:
         openai_ws = await websockets.connect(
             OPENAI_REALTIME_URL,
-            extra_headers=headers,   # IMPORTANT FIX
-            ping_interval=20,
+            extra_headers={
+                "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                "OpenAI-Beta": "realtime=v1",
+            },
+            ping_interval=20
         )
 
         logger.info("REALTIME CONNECTED")
 
-        # ----------------------------------------------------
-        # SESSION INIT
-        # ----------------------------------------------------
-
-        await safe_send(openai_ws, {
+        await openai_ws.send(json.dumps({
             "type": "session.update",
             "session": {
                 "modalities": ["audio"],
@@ -90,11 +99,23 @@ async def media_stream(ws: WebSocket):
                 "turn_detection": {"type": "server_vad"},
                 "instructions": "You are a helpful voice assistant."
             }
-        })
+        }))
 
     except Exception as e:
-        logger.error(f"REALTIME FAILED → FALLBACK ACTIVATED: {e}")
+        logger.error(f"REALTIME FAILED → FALLBACK MODE: {e}")
         openai_ws = None
+
+    # --------------------------------------------------------
+    # INTRO MESSAGE (ALWAYS SPEAK)
+    # --------------------------------------------------------
+
+    async def intro():
+        if stream_sid:
+            await tts_speak(
+                "Hello! I am your assistant. How can I help you today?",
+                stream_sid,
+                ws
+            )
 
     # --------------------------------------------------------
     # TWILIO → OPENAI
@@ -107,26 +128,29 @@ async def media_stream(ws: WebSocket):
             data = json.loads(msg)
             event = data.get("event")
 
+            # START CALL
             if event == "start":
                 stream_sid = data["start"]["streamSid"]
-                logger.info(f"STREAM STARTED {stream_sid}")
+                logger.info(f"CALL STARTED {stream_sid}")
 
-                if openai_ws:
-                    await safe_send(openai_ws, {
-                        "type": "response.create"
-                    })
+                await intro()
 
+            # AUDIO FROM USER
             elif event == "media":
+
                 audio = data["media"]["payload"]
 
                 if openai_ws:
-                    await safe_send(openai_ws, {
-                        "type": "input_audio_buffer.append",
-                        "audio": audio
-                    })
+                    try:
+                        await openai_ws.send(json.dumps({
+                            "type": "input_audio_buffer.append",
+                            "audio": audio
+                        }))
+                    except Exception as e:
+                        logger.error(f"OPENAI SEND FAIL: {e}")
 
             elif event == "stop":
-                logger.info("TWILIO STOP")
+                logger.info("CALL ENDED")
                 break
 
     # --------------------------------------------------------
@@ -134,7 +158,6 @@ async def media_stream(ws: WebSocket):
     # --------------------------------------------------------
 
     async def openai_loop():
-        nonlocal stream_sid
 
         if not openai_ws:
             return
@@ -147,19 +170,19 @@ async def media_stream(ws: WebSocket):
                 if not stream_sid:
                     continue
 
-                audio = event["delta"]
-
                 await ws.send_json({
                     "event": "media",
                     "streamSid": stream_sid,
-                    "media": {"payload": audio}
+                    "media": {
+                        "payload": event["delta"]
+                    }
                 })
 
             elif t == "error":
                 logger.error(f"OPENAI ERROR: {event}")
 
     # --------------------------------------------------------
-    # RUN
+    # RUN BOTH LOOPS
     # --------------------------------------------------------
 
     try:
@@ -169,7 +192,7 @@ async def media_stream(ws: WebSocket):
         )
 
     except Exception:
-        logger.exception("WEBHOOK CRASHED")
+        logger.exception("WEBHOOK CRASH")
 
     finally:
         if openai_ws:
