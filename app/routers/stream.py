@@ -165,12 +165,20 @@ import asyncio
 import json
 import websockets
 
+# ------------------------------------------------------------
+# CONFIG
+# ------------------------------------------------------------
+
 OPENAI_API_KEY = "YOUR_API_KEY_HERE"
 
 OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
 
 
-async def test_realtime():
+# ------------------------------------------------------------
+# MAIN TEST
+# ------------------------------------------------------------
+
+async def test_openai_realtime():
 
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -186,24 +194,29 @@ async def test_realtime():
 
             print("✅ Connected to OpenAI Realtime")
 
-            # ---------------------------------------------------------
-            # MINIMAL SESSION UPDATE (this is the critical test)
-            # ---------------------------------------------------------
+            # --------------------------------------------------------
+            # SAFE SESSION UPDATE (MINIMAL + COMPATIBLE)
+            # --------------------------------------------------------
 
             session_update = {
                 "type": "session.update",
                 "session": {
                     "modalities": ["audio"],
-                    "instructions": "Say hello briefly."
+                    "instructions": "You are a helpful assistant. Say hello briefly.",
+                    "input_audio_format": "g711_ulaw",
+                    "output_audio_format": "g711_ulaw",
+                    "turn_detection": {
+                        "type": "server_vad"
+                    }
                 }
             }
 
             await ws.send(json.dumps(session_update))
-            print("➡️ Sent session.update")
+            print("➡️ session.update sent")
 
-            # ---------------------------------------------------------
-            # Ask for a response
-            # ---------------------------------------------------------
+            # --------------------------------------------------------
+            # REQUEST A RESPONSE
+            # --------------------------------------------------------
 
             response_create = {
                 "type": "response.create",
@@ -213,25 +226,27 @@ async def test_realtime():
             }
 
             await ws.send(json.dumps(response_create))
-            print("➡️ Sent response.create")
+            print("➡️ response.create sent")
 
-            # ---------------------------------------------------------
-            # Listen for events
-            # ---------------------------------------------------------
+            # --------------------------------------------------------
+            # LISTEN FOR EVENTS
+            # --------------------------------------------------------
 
             async for message in ws:
+
                 event = json.loads(message)
+                event_type = event.get("type")
 
-                print("⬅️ Event:", event.get("type"))
+                print("⬅️", event_type)
 
-                # print full error if it happens
-                if event.get("type") == "error":
-                    print("❌ ERROR DETAILS:")
+                # PRINT ERRORS CLEARLY
+                if event_type == "error":
+                    print("\n❌ OPENAI ERROR:")
                     print(json.dumps(event, indent=2))
 
-                # stop after first response is done
-                if event.get("type") == "response.done":
-                    print("✅ Response completed")
+                # STOP AFTER COMPLETION
+                if event_type == "response.done":
+                    print("\n✅ RESPONSE COMPLETE")
                     break
 
     except Exception as e:
@@ -239,5 +254,9 @@ async def test_realtime():
         print(e)
 
 
+# ------------------------------------------------------------
+# RUN
+# ------------------------------------------------------------
+
 if __name__ == "__main__":
-    asyncio.run(test_realtime())
+    asyncio.run(test_openai_realtime())
