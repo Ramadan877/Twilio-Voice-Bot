@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Using the exact URL and stable model you referenced
-OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
+# FIX: Switched to the GPT-Realtime mini model for faster speeds and much lower cost
+OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview"
 
 @router.websocket("/media-stream")
 async def handle_media_stream(twilio_ws: WebSocket):
@@ -31,7 +31,7 @@ async def handle_media_stream(twilio_ws: WebSocket):
 
     try:
         async with websockets.connect(OPENAI_WS_URL, additional_headers=openai_headers, ping_interval=None) as openai_ws:
-            logger.info("Connected to OpenAI Realtime API.")
+            logger.info(f"Connected to OpenAI Realtime API using {OPENAI_WS_URL}.")
             
             stream_sid = None
 
