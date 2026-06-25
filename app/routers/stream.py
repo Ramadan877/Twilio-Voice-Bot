@@ -1,4 +1,11 @@
-"""Here it listens on /media-stream for Twilio's connection, opens a second connection to OpenAI, and passes the binary audio buffers back and forth concurrently"""             
+"""
+Twilio <-> OpenAI Realtime bridge
+
+Listens on /media-stream for Twilio Media Streams,
+opens a second websocket to OpenAI Realtime,
+and forwards audio in both directions.
+"""
+
 import json
 import asyncio
 import logging
@@ -34,13 +41,10 @@ OPENAI_WS_URL = (
 )
 
 # -----------------------------------------------------------------------------
-# Helpers
+# Helper
 # -----------------------------------------------------------------------------
 
 async def send_to_openai(openai_ws, payload: dict):
-    """
-    Send payload to OpenAI and log it.
-    """
     logger.info(
         "OPENAI >>> %s",
         json.dumps(payload, indent=2)
@@ -85,9 +89,9 @@ async def handle_media_stream(twilio_ws: WebSocket):
             audio_chunks_from_twilio = 0
             audio_chunks_from_openai = 0
 
-            # -------------------------------------------------------------
-            # TWILIO -> OPENAI
-            # -------------------------------------------------------------
+            # -----------------------------------------------------------------
+            # Twilio -> OpenAI
+            # -----------------------------------------------------------------
 
             async def receive_from_twilio():
                 nonlocal stream_sid
@@ -96,13 +100,7 @@ async def handle_media_stream(twilio_ws: WebSocket):
                 try:
                     async for message in twilio_ws.iter_text():
 
-                        logger.debug(
-                            "TWILIO RAW <<< %s",
-                            message[:1000]
-                        )
-
                         data = json.loads(message)
-
                         event_type = data.get("event")
 
                         logger.info(
@@ -110,9 +108,9 @@ async def handle_media_stream(twilio_ws: WebSocket):
                             event_type
                         )
 
-                        # -------------------------------------------------
+                        # -----------------------------------------------------
                         # START
-                        # -------------------------------------------------
+                        # -----------------------------------------------------
 
                         if event_type == "start":
 
@@ -126,24 +124,14 @@ async def handle_media_stream(twilio_ws: WebSocket):
                             session_update = {
                                 "type": "session.update",
                                 "session": {
-                                    "modalities": ["audio", "text"],
+                                    "type": "realtime",
                                     "instructions": (
                                         "You are a helpful phone assistant. "
-                                        "Be brief."
+                                        "Be brief and conversational."
                                     ),
-                                    "voice": "alloy",
-                                    "input_audio_format": "g711_ulaw",
-                                    "output_audio_format": "g711_ulaw",
-                                    "turn_detection": {
-                                        "type": "server_vad"
-                                    }
+                                    "voice": "alloy"
                                 }
                             }
-
-                            logger.info(
-                                "SESSION UPDATE PAYLOAD:\n%s",
-                                json.dumps(session_update, indent=2)
-                            )
 
                             await send_to_openai(
                                 openai_ws,
@@ -153,8 +141,9 @@ async def handle_media_stream(twilio_ws: WebSocket):
                             initial_response = {
                                 "type": "response.create",
                                 "response": {
-                                    "instructions":
+                                    "instructions": (
                                         "Say: Hello! How can I help you today?"
+                                    )
                                 }
                             }
 
@@ -163,9 +152,9 @@ async def handle_media_stream(twilio_ws: WebSocket):
                                 initial_response
                             )
 
-                        # -------------------------------------------------
+                        # -----------------------------------------------------
                         # AUDIO
-                        # -------------------------------------------------
+                        # -----------------------------------------------------
 
                         elif event_type == "media":
 
@@ -177,18 +166,18 @@ async def handle_media_stream(twilio_ws: WebSocket):
                                     audio_chunks_from_twilio
                                 )
 
-                            payload = {
-                                "type": "input_audio_buffer.append",
-                                "audio": data["media"]["payload"]
-                            }
-
                             await openai_ws.send(
-                                json.dumps(payload)
+                                json.dumps(
+                                    {
+                                        "type": "input_audio_buffer.append",
+                                        "audio": data["media"]["payload"]
+                                    }
+                                )
                             )
 
-                        # -------------------------------------------------
+                        # -----------------------------------------------------
                         # STOP
-                        # -------------------------------------------------
+                        # -----------------------------------------------------
 
                         elif event_type == "stop":
 
@@ -210,9 +199,9 @@ async def handle_media_stream(twilio_ws: WebSocket):
                         "ERROR READING FROM TWILIO"
                     )
 
-            # -------------------------------------------------------------
-            # OPENAI -> TWILIO
-            # -------------------------------------------------------------
+            # -----------------------------------------------------------------
+            # OpenAI -> Twilio
+            # -----------------------------------------------------------------
 
             async def send_to_twilio():
 
@@ -223,11 +212,10 @@ async def handle_media_stream(twilio_ws: WebSocket):
 
                         logger.info(
                             "OPENAI RAW <<< %s",
-                            message
+                            message[:1000]
                         )
 
                         response = json.loads(message)
-
                         event_type = response.get("type")
 
                         logger.info(
@@ -235,16 +223,20 @@ async def handle_media_stream(twilio_ws: WebSocket):
                             event_type
                         )
 
-                        # ---------------------------------------------
+                        # -----------------------------------------------------
                         # AUDIO DELTAS
-                        # ---------------------------------------------
+                        # -----------------------------------------------------
 
                         if (
-                            event_type == "response.audio.delta"
+                            event_type == "response.output_audio.delta"
                             and stream_sid
                         ):
 
                             audio_chunks_from_openai += 1
+
+                            logger.info(
+                                "FORWARDING AUDIO TO TWILIO"
+                            )
 
                             if audio_chunks_from_openai % 100 == 0:
                                 logger.info(
@@ -258,16 +250,29 @@ async def handle_media_stream(twilio_ws: WebSocket):
                                         "event": "media",
                                         "streamSid": stream_sid,
                                         "media": {
-                                            "payload":
-                                                response["delta"]
+                                            "payload": response["delta"]
                                         }
                                     }
                                 )
                             )
 
-                        # ---------------------------------------------
+                            logger.info(
+                                "AUDIO SENT TO TWILIO"
+                            )
+
+                        # -----------------------------------------------------
+                        # RESPONSE COMPLETE
+                        # -----------------------------------------------------
+
+                        elif event_type == "response.done":
+
+                            logger.info(
+                                "OPENAI RESPONSE COMPLETE"
+                            )
+
+                        # -----------------------------------------------------
                         # ERRORS
-                        # ---------------------------------------------
+                        # -----------------------------------------------------
 
                         elif event_type == "error":
 
@@ -293,9 +298,9 @@ async def handle_media_stream(twilio_ws: WebSocket):
                         "UNEXPECTED ERROR IN OPENAI LOOP"
                     )
 
-            # -------------------------------------------------------------
-            # RUN BOTH SIDES
-            # -------------------------------------------------------------
+            # -----------------------------------------------------------------
+            # Run both directions
+            # -----------------------------------------------------------------
 
             await asyncio.gather(
                 receive_from_twilio(),
