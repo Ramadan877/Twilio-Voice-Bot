@@ -46,12 +46,13 @@ async def handle_media_stream(twilio_ws: WebSocket):
                             logger.info(f"Call started. Stream SID: {stream_sid}")
                             
                         elif data['event'] == 'media':
-                            if openai_ws.open:
-                                audio_event = {
-                                    "type": "input_audio_buffer.append",
-                                    "audio": data['media']['payload']
-                                }
-                                await openai_ws.send(json.dumps(audio_event))
+                            # FIX: Removed the deprecated 'if openai_ws.open:' check. 
+                            # We just send the audio directly!
+                            audio_event = {
+                                "type": "input_audio_buffer.append",
+                                "audio": data['media']['payload']
+                            }
+                            await openai_ws.send(json.dumps(audio_event))
                                 
                         elif data['event'] == 'stop':
                             logger.info("Twilio call hung up.")
