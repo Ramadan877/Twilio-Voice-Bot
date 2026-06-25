@@ -1,14 +1,19 @@
 """Here it listens on /media-stream for Twilio's connection, opens a second connection to OpenAI, and passes the binary audio buffers back and forth concurrently"""
 import json
 import asyncio
+import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.config import settings
 import websockets
 
+# FIX 1: Set up instant, unbuffered logging so we are never blind again!
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
-# FIX 1: Using the official, stable model alias for General Availability
-OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
+# FIX 2: Point to the guaranteed stable Realtime endpoint
+OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17"
 
 @router.websocket("/media-stream")
 async def handle_media_stream(twilio_ws: WebSocket):
@@ -16,16 +21,17 @@ async def handle_media_stream(twilio_ws: WebSocket):
     Handles the live audio stream between Twilio and OpenAI.
     """
     await twilio_ws.accept()
-    print("Twilio phone stream connected.")
+    logger.info("Twilio phone stream connected.")
 
+    # FIX 3: Re-added the mandatory Beta header. OpenAI silently rejects connections without this!
     openai_headers = {
-        "Authorization": f"Bearer {settings.OPENAI_API_KEY}"
+        "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+        "OpenAI-Beta": "realtime=v1"
     }
 
     try:
-        # FIX: Added ping_interval=None to stop the library from dropping the connection during heavy audio streams!
         async with websockets.connect(OPENAI_WS_URL, additional_headers=openai_headers, ping_interval=None) as openai_ws:
-            print("Connected to OpenAI Realtime API.")
+            logger.info("Connected to OpenAI Realtime API.")
             
             stream_sid = None
 
@@ -37,7 +43,7 @@ async def handle_media_stream(twilio_ws: WebSocket):
                         
                         if data['event'] == 'start':
                             stream_sid = data['start']['streamSid']
-                            print(f"Call started. Stream SID: {stream_sid}")
+                            logger.info(f"Call started. Stream SID: {stream_sid}")
                             
                         elif data['event'] == 'media':
                             if openai_ws.open:
@@ -48,22 +54,21 @@ async def handle_media_stream(twilio_ws: WebSocket):
                                 await openai_ws.send(json.dumps(audio_event))
                                 
                         elif data['event'] == 'stop':
-                            print("Twilio call hung up.")
+                            logger.info("Twilio call hung up.")
                             break
                 except WebSocketDisconnect:
-                    print("Twilio WebSocket disconnected.")
+                    logger.info("Twilio WebSocket disconnected.")
                 except Exception as e:
-                    print(f"Error reading from Twilio: {e}")
+                    logger.error(f"Error reading from Twilio: {e}")
 
             async def send_to_twilio():
                 nonlocal stream_sid
                 try:
-                    # FIX 2: The "Empty Room" Fix
-                    # Wait in a tiny loop until Twilio gives us the phone call ID before we wake up the AI
+                    # Wait in a tiny loop until Twilio gives us the phone call ID
                     while stream_sid is None:
                         await asyncio.sleep(0.1)
 
-                    # 1. Send the session configuration immediately
+                    # Send the session configuration
                     session_update = {
                         "type": "session.update",
                         "session": {
@@ -79,15 +84,13 @@ async def handle_media_stream(twilio_ws: WebSocket):
                     }
                     await openai_ws.send(json.dumps(session_update))
 
-                    # 2. Process incoming messages from OpenAI
+                    # Process incoming messages from OpenAI
                     async for message in openai_ws:
                         response = json.loads(message)
                         event_type = response.get("type")
                         
-                        # THE PCM16 STATIC FIX: 
-                        # Wait until OpenAI confirms the audio format is U-Law BEFORE making it speak
                         if event_type == "session.updated":
-                            print("Session configured to U-Law successfully. Triggering AI greeting.")
+                            logger.info("Session configured to U-Law successfully. Triggering AI greeting.")
                             initial_greeting = {
                                 "type": "response.create",
                                 "response": {
@@ -107,15 +110,15 @@ async def handle_media_stream(twilio_ws: WebSocket):
                             }
                             await twilio_ws.send_text(json.dumps(twilio_message))
                             
-                        # Debug logging (ignoring audio deltas to prevent spam)
+                        # Debug logging (ignoring audio deltas to prevent log spam)
                         elif event_type not in ["response.audio.delta", "input_audio_buffer.append"]:
-                            print(f"OpenAI Event: {event_type}")
+                            logger.info(f"OpenAI Event: {event_type}")
 
                 except Exception as e:
-                    print(f"Error in OpenAI loop: {e}")
+                    logger.error(f"Error in OpenAI loop: {e}")
 
             # Run both WebSocket streams concurrently
             await asyncio.gather(receive_from_twilio(), send_to_twilio())
 
     except Exception as e:
-        print(f"Failed to connect to OpenAI: {e}")
+        logger.error(f"Failed to connect to OpenAI: {e}")
