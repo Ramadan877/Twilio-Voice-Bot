@@ -22,7 +22,6 @@ async def handle_media_stream(twilio_ws: WebSocket):
     await twilio_ws.accept()
     logger.info("Twilio phone stream connected.")
 
-    # officially using the General Availability API 
     openai_headers = {
         "Authorization": f"Bearer {settings.OPENAI_API_KEY}"
     }
@@ -44,7 +43,6 @@ async def handle_media_stream(twilio_ws: WebSocket):
                             logger.info(f"Call started. Stream SID: {stream_sid}")
                             
                         elif data['event'] == 'media':
-                            # Directly send audio with no deprecated checks
                             audio_event = {
                                 "type": "input_audio_buffer.append",
                                 "audio": data['media']['payload']
@@ -71,15 +69,21 @@ async def handle_media_stream(twilio_ws: WebSocket):
                             logger.error("Timeout waiting for Twilio stream SID. Cancelling.")
                             return
 
-                    # Send the session configuration
+                    # FIX: The Official General Availability Session Shape!
                     session_update = {
                         "type": "session.update",
                         "session": {
-                            "modalities": ["audio", "text"],
-                            "instructions": "You are a helpful phone assistant. Be highly concise.",
+                            "type": "realtime",
                             "voice": "alloy",
-                            "input_audio_format": "g711_ulaw", 
-                            "output_audio_format": "g711_ulaw",
+                            "instructions": "You are a helpful phone assistant. Be highly concise.",
+                            "audio": {
+                                "input": {
+                                    "format": { "type": "audio/pcmu" }
+                                },
+                                "output": {
+                                    "format": { "type": "audio/pcmu" }
+                                }
+                            },
                             "turn_detection": {
                                 "type": "server_vad"
                             }
@@ -92,7 +96,6 @@ async def handle_media_stream(twilio_ws: WebSocket):
                         response = json.loads(message)
                         event_type = response.get("type")
                         
-                        # EXPLICIT ERROR CATCHER:
                         if event_type == "error":
                             logger.error(f"OPENAI API FATAL ERROR: {response}")
                             
@@ -106,8 +109,8 @@ async def handle_media_stream(twilio_ws: WebSocket):
                             }
                             await openai_ws.send(json.dumps(initial_greeting))
 
-                        # Route the AI's audio chunks back to the phone
-                        elif event_type == "response.audio.delta" and stream_sid:
+                        # FIX: Catching the GA output audio delta event
+                        elif event_type == "response.output_audio.delta" and stream_sid:
                             twilio_message = {
                                 "event": "media",
                                 "streamSid": stream_sid,
@@ -117,15 +120,19 @@ async def handle_media_stream(twilio_ws: WebSocket):
                             }
                             await twilio_ws.send_text(json.dumps(twilio_message))
                             
-                        # Standard event logging
-                        elif event_type not in ["response.audio.delta", "input_audio_buffer.append"]:
+                        elif event_type not in ["response.output_audio.delta", "input_audio_buffer.append"]:
                             logger.info(f"OpenAI Event: {event_type}")
 
                 except Exception as e:
                     logger.error(f"Error in OpenAI loop: {e}")
 
-            # Run both WebSocket streams concurrently
             await asyncio.gather(receive_from_twilio(), send_to_twilio())
 
     except Exception as e:
         logger.error(f"Failed to connect to OpenAI: {e}")
+    finally:
+        # FIX: Gracefully close the Twilio WebSocket to prevent the 31921 error
+        try:
+            await twilio_ws.close()
+        except Exception:
+            pass
